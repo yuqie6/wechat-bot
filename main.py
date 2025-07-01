@@ -81,6 +81,7 @@ def main():
                             opened_windows.add(chat_name)
                             logger.info(f"已成功将群聊 [{chat_name}] 窗口独立出来。")
                             time.sleep(0.5) # 等待窗口弹出
+                            wx.SwitchToChat() # 将焦点切回主聊天页面，确保下次循环能正确获取会话列表
                             break
                 except Exception as e:
                     logger.error(f"尝试独立群聊 [{chat_name}] 窗口失败: {e}")
