@@ -10,7 +10,6 @@ venv/
 # IDE / Editor
 .vscode/
 .idea/
-.gitignore/
 wxauto_logs/
 # Logs and History
 logs/

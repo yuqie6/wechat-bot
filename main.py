@@ -1,7 +1,7 @@
 import time
 import queue
 from wxauto import WeChat
-from config import LISTEN_CONTACTS, GEMINI_API_KEY, GROUP_BOT_NAME
+from config import LISTEN_CONTACTS, GEMINI_API_KEY, GROUP_BOT_NAME, GROUP_CHATS
 from gemini_handler import get_ai_response
 from logger import logger
 
@@ -68,8 +68,9 @@ def main():
             # 获取聊天信息
             chat_info = msg.chat_info()
             chat_name = chat_info.get('name', msg.sender)
-            # 通过判断发送者和聊天窗口名称是否相同，来确定是否为群聊 (更可靠)
-            is_group = msg.sender != chat_name
+            
+            # 通过用户在 config.py 中定义的 GROUP_CHATS 列表来判断是否为群聊
+            is_group = chat_name in GROUP_CHATS
 
             # 如果是群聊，并且是第一次处理该群聊的消息，则双击独立出窗口
             if is_group and chat_name not in opened_windows:
