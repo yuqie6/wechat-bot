@@ -3,11 +3,16 @@ import queue
 import os
 from wxauto import WeChat
 from config import LISTEN_CONTACTS, GEMINI_API_KEY, GROUP_BOT_NAME
-from gemini_handler import get_ai_response
+from gemini_handler import get_ai_response, clear_history, update_image_context, get_image_path_from_context
 from logger import logger
 
 # 创建一个线程安全的队列，用于在回调和主循环之间传递消息
 task_queue = queue.Queue()
+# 图片上下文管理已移至 gemini_handler.py
+# 用于存储每个聊天窗口的最新图片信息（路径和时间戳）
+# 结构: {'chat_name': {'path': 'path/to/image.png', 'timestamp': 1678886400}}
+# last_image_context = {}
+# IMAGE_CONTEXT_TTL = 3000 # 图片上下文的有效时间（秒），这里设置为50分钟
 
 def message_callback(msg, chat):
     """
@@ -15,19 +20,52 @@ def message_callback(msg, chat):
     它的作用是把收到的消息和关联的聊天窗口对象一起放入队列。
     """
     try:
-        # 允许处理文本、语音、图片和拍一拍消息，并过滤掉自己发送的
-        allowed_types = ['text', 'voice', 'tickle', 'image']
-        if msg.type in allowed_types and msg.attr != 'self':
-            # 将消息和聊天窗口对象的元组放入队列
+        # --- 最终修复：根据日志，拍一拍事件的来源(attr)是'tickle'，而不是类型(type) ---
+        # 我们现在监听所有非自己发送的消息，并在主循环中进行更精确的分类处理
+        if msg.attr != 'self':
             task_queue.put((msg, chat))
     except Exception as e:
         logger.error(f"[回调错误] {e}")
+
+def process_friend_requests(wx_instance):
+    """
+    定期检查并自动接受新的好友请求。
+    """
+    try:
+        # 检查 wx_instance 是否具有 GetNewFriends 方法
+        if hasattr(wx_instance, 'GetNewFriends'):
+            logger.info("正在检查新的好友申请...")
+            new_friends = wx_instance.GetNewFriends(acceptable=True)
+            if not new_friends:
+                logger.info("没有发现新的好友申请。")
+                return
+
+            logger.info(f"发现 {len(new_friends)} 条新的好友申请，正在处理...")
+            for friend_request in new_friends:
+                try:
+                    # 为新好友创建一个备注
+                    remark = f"自动添加_{friend_request.name}"
+                    # 接受好友请求
+                    friend_request.accept(remark=remark)
+                    logger.info(f"已自动接受好友 '{friend_request.name}' 的申请，并设置备注为 '{remark}'。")
+                    time.sleep(1) # 短暂延时，避免操作过快
+                except Exception as e:
+                    logger.error(f"处理好友 '{friend_request.name}' 的申请时失败: {e}")
+        else:
+            logger.warning("当前 wxauto 版本不支持 'GetNewFriends' 功能，已跳过好友申请检查。请安装 Plus 版 (wxautox) 以使用此功能。")
+            
+    except Exception as e:
+        logger.error(f"检查好友申请时发生未知错误: {e}")
+
 
 def main():
     """
     程序主入口，采用基于队列的被动监听模式。
     """
     opened_windows = set() # 用于记录已独立出来的群聊窗口
+    last_friend_check_time = 0 # 上次检查好友申请的时间
+    FRIEND_CHECK_INTERVAL = 300 # 每 300 秒（5分钟）检查一次
+
     logger.info("--- 微信 AI 机器人启动中 (被动监听模式) ---")
 
     if not GEMINI_API_KEY or GEMINI_API_KEY == 'YOUR_API_KEY':
@@ -63,6 +101,13 @@ def main():
     # 主循环（消费者）
     while True:
         try:
+            # --- 定期任务：检查好友申请 ---
+            current_time = time.time()
+            if current_time - last_friend_check_time > FRIEND_CHECK_INTERVAL:
+                process_friend_requests(wx)
+                last_friend_check_time = current_time
+
+            # --- 消息处理 ---
             # 从队列中获取任务，如果队列为空，会阻塞等待
             msg, chat = task_queue.get(timeout=60) # 设置超时以防永久阻塞
 
@@ -75,17 +120,25 @@ def main():
 
             # --- 1. 分类预处理，提取内容 ---
             user_message = ""
+            user_message = ""
             image_path = None
-            ai_response = None
+            text_response = None
+            files_to_send = []
 
-            if msg.type == 'tickle':
+            # --- 最终修复：检查 msg.attr 而不是 msg.type ---
+            if msg.attr == 'tickle':
                 bot_name_in_tickle = GROUP_BOT_NAME.lstrip('@')
+                logger.info(f"收到来自群聊的拍一拍消息。内容: '{msg.content}'，与机器人名 '{bot_name_in_tickle}' 匹配...")
+                
+                # 检查被拍的是否是机器人
                 if bot_name_in_tickle in msg.content:
-                    logger.info(f"被 [{msg.sender}] 拍了拍，发送一个俏皮的回复。")
-                    msg.quote("（づ￣3￣）づ╭❤～ 别拍啦，再拍就坏掉啦！")
+                    logger.info(f"匹配成功！将“拍一拍”事件作为AI输入。")
+                    # 构造一个消息，让AI知道发生了什么
+                    user_message = f"[{msg.sender} 拍了拍我]"
+                    # should_process 将在下面的通用逻辑中被设置为 True
                 else:
-                    logger.info(f"收到了一个与机器人无关的拍一拍消息，已忽略。")
-                continue
+                    logger.info(f"匹配失败。这是一个与机器人无关的拍一拍消息，已忽略。")
+                    continue # 如果是与机器人无关的拍一拍，直接跳过
 
             elif msg.type == 'image':
                 try:
@@ -93,11 +146,22 @@ def main():
                     if not os.path.exists(img_dir):
                         os.makedirs(img_dir)
                     logger.info(f"收到来自 [{msg.sender}] 的图片消息，正在下载...")
-                    image_path = msg.download(dir_path=img_dir)
-                    user_message = msg.content  # 图片附带的文字
-                    logger.info(f"图片下载成功: {image_path}")
+                    downloaded_path = msg.download(dir_path=img_dir)
+                    logger.info(f"图片下载成功: {downloaded_path}")
+                    
+                    # 更新图片上下文，使用绝对路径
+                    update_image_context(
+                        chat_name=chat_name,
+                        path=os.path.abspath(downloaded_path),
+                        timestamp=time.time()
+                    )
+                    
+                    # 收到图片后，引导用户输入指令
+                    text_response = "图片收到！请告诉我需要对它做什么（例如：抠出图中的人像）。"
+                    # logger.info(f"已为 [{chat_name}] 更新图片上下文，并发送引导语。") # 日志记录已移到handler中
+                    
                 except Exception as e:
-                    logger.error(f"下载图片失败: {e}")
+                    logger.error(f"下载或处理图片上下文失败: {e}")
                     continue
             
             elif msg.type == 'voice':
@@ -113,43 +177,78 @@ def main():
                     continue
             
             elif msg.type == 'text':
-                user_message = msg.content
+                user_message = msg.content.strip()
 
-            # --- 2. 应用群聊@规则 ---
+
+                # 使用 gemini_handler 中提供的函数来安全地获取图片路径
+                image_path = get_image_path_from_context(chat_name)
+                if image_path:
+                    logger.info(f"找到与消息 '{user_message}' 关联的图片: {image_path}")
+                else:
+                    # 如果没有找到有效图片，image_path 会是 None，后续逻辑会正常处理
+                    pass
+
+            # --- 2. 应用群聊@规则 & 调用AI ---
+            final_user_message = user_message
+            should_process = False # 在这里初始化，确保它总是有值
+            
+            # 检查是否为特殊命令，并确定是否需要调用AI
+            is_clear_command = (user_message == '清除历史记录')
+            
             if is_group:
                 at_name_with_symbol = f"@{GROUP_BOT_NAME}" if not GROUP_BOT_NAME.startswith('@') else GROUP_BOT_NAME
-                if at_name_with_symbol not in user_message:
-                    continue # 在群聊中，如果没有@机器人，则忽略
-                user_message = user_message.replace(at_name_with_symbol, "").strip()
+                if at_name_with_symbol in user_message:
+                    stripped_message = user_message.replace(at_name_with_symbol, "").strip()
+                    if stripped_message == '清除历史记录':
+                        is_clear_command = True
+                    else:
+                        final_user_message = f"{msg.sender}: {stripped_message}"
+                        should_process = True # 是@消息，且不是命令，需要AI处理
+                elif not is_clear_command:
+                    # 在群聊中，如果既不是@消息，也不是特殊命令，则忽略
+                    continue
+            else: # 私聊
+                should_process = not is_clear_command
 
-            # --- 3. 根据内容调用AI或进行其他处理 ---
-            if image_path:
-                # 如果用户没有附带文字，我们使用一个默认提示
-                prompt = user_message if user_message else "请详细描述这张图片，分析其中的内容和场景。"
-                logger.info(f"准备调用AI分析图片: {image_path}, 附带消息: '{prompt}'")
-                ai_response = get_ai_response(chat_name, prompt, image_path=image_path, is_group=is_group, sender_name=msg.sender)
-            
-            elif user_message:
-                # 为群聊消息加上发送者前缀，以便在历史记录中区分
-                final_user_message = f"{msg.sender}: {user_message}" if is_group else user_message
-                logger.info(f"在 [{chat_name}] 中收到来自 [{msg.sender}] 的有效消息: {user_message}")
-                ai_response = get_ai_response(chat_name, final_user_message, is_group=is_group, sender_name=msg.sender)
-            
-            else: # 处理空消息（如仅@）
-                if is_group:
-                    ai_response = "你好，我在！有什么可以帮你的吗？"
-                    logger.info(f"收到来自 [{msg.sender}] 的空@提及，已发送预设回复。")
+            # 根据标志执行操作
+            if is_clear_command:
+                logger.info(f"收到来自 [{chat_name}] 的清除历史记录命令。")
+                if clear_history(chat_name):
+                    text_response = "好的，我已经忘记我们之前聊过什么了。有什么新话题吗？"
                 else:
-                    logger.info(f"收到来自 [{msg.sender}] 的空消息，已忽略。")
+                    text_response = "嗯...我好像还不认识你，没有找到我们的聊天记录。"
+            
+            if should_process and (final_user_message or image_path):
+                logger.info(f"准备调用AI处理: '{final_user_message}' (图片: {'有' if image_path else '无'})")
+                text_response, files_to_send = get_ai_response(
+                    contact_name=chat_name,
+                    user_message=final_user_message,
+                    image_path=image_path,
+                    is_group=is_group,
+                    sender_name=msg.sender
+                )
+            elif not text_response and not is_clear_command:
+                 logger.info(f"收到来自 [{msg.sender}] 的空消息或不需处理的消息，已忽略。")
 
-            # --- 4. 发送最终回复 ---
-            if ai_response:
-                logger.info(f"最终回复内容: {ai_response}")
+
+            # --- 3. 发送最终回复 ---
+            if text_response:
+                logger.info(f"最终文本回复: {text_response}")
                 try:
-                    msg.quote(ai_response)
-                    logger.info("回复已发送。")
+                    msg.quote(text_response)
+                    logger.info("文本回复已发送。")
                 except Exception as send_e:
-                    logger.error(f"发送回复失败: {send_e}")
+                    logger.error(f"发送文本回复失败: {send_e}")
+            
+            if files_to_send:
+                logger.info(f"准备发送 {len(files_to_send)} 个文件...")
+                for file_path in files_to_send:
+                    try:
+                        chat.SendFiles(file_path)
+                        logger.info(f"已发送文件: {file_path}")
+                        time.sleep(0.5)
+                    except Exception as e:
+                        logger.error(f"发送文件 {file_path} 失败: {e}")
         
         except queue.Empty:
             # 队列为空是正常情况，继续等待

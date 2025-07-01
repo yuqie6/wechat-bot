@@ -15,10 +15,18 @@ images/
 # Logs and History
 logs/
 history/
-
+segmentation_outputs/
 # Configuration - IMPORTANT
+
 # Do not commit your personal config file with API keys
 config.py
+
+# Environment variables
+.env
+库文档.md
+genai.md
+@AutomationLog.txt
+.gitignore
 
 # OS generated files
 .DS_Store
