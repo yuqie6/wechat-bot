@@ -27,10 +27,13 @@ handler.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 
-# 定义 handler 的输出格式
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
+# 为文件日志定义详细的输出格式
+file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
+handler.setFormatter(file_formatter)
+
+# 为控制台日志定义简洁的输出格式
+console_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
+console_handler.setFormatter(console_formatter)
 
 # 给 logger 添加 handler
 if not logger.handlers:

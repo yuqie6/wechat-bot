@@ -11,6 +11,7 @@ venv/
 .vscode/
 .idea/
 wxauto_logs/
+images/
 # Logs and History
 logs/
 history/

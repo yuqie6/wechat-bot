@@ -1,6 +1,8 @@
-import google.generativeai as genai
 import json
 import os
+import PIL.Image
+from google.generativeai.client import configure
+from google.generativeai.generative_models import GenerativeModel
 from google.api_core import client_options
 from config import GEMINI_API_KEY, GEMINI_BASE_URL, SYSTEM_PROMPT, HISTORY_DIR
 from logger import logger
@@ -17,9 +19,9 @@ if GEMINI_BASE_URL:
         cleaned_url = cleaned_url[:-len('/v1beta')]
         
     opts = client_options.ClientOptions(api_endpoint=cleaned_url)
-    genai.configure(api_key=GEMINI_API_KEY, transport="rest", client_options=opts)
+    configure(api_key=GEMINI_API_KEY, transport="rest", client_options=opts)
 else:
-    genai.configure(api_key=GEMINI_API_KEY)
+    configure(api_key=GEMINI_API_KEY)
 
 # 对话历史记录
 # 结构: {'联系人/群聊名': [message, message, ...]}
@@ -50,49 +52,75 @@ def load_history(contact_name):
     return []
 
 # 初始化 Gemini Pro 模型
-model = genai.GenerativeModel(
+model = GenerativeModel(
     'gemini-2.5-flash',
     system_instruction=SYSTEM_PROMPT
 )
 
-def get_ai_response(contact_name, user_message):
+def get_ai_response(contact_name, user_message, image_path=None, is_group=False, sender_name=None):
     """
-    获取 AI 的回复。
+    获取 AI 的回复，支持文本、图片，并能感知群聊中的不同用户。
 
     Args:
-        contact_name (str): 联系人或群聊的名称.
-        user_message (str): 用户发送的最新消息.
+        contact_name (str): 聊天窗口的名称 (群名或好友名).
+        user_message (str): 用户发送的最新消息 (在群聊中已包含发言人前缀).
+        image_path (str, optional): 附带的图片路径. Defaults to None.
+        is_group (bool, optional): 是否为群聊. Defaults to False.
+        sender_name (str, optional): 在群聊中的消息发送者昵称. Defaults to None.
 
     Returns:
         str: AI 生成的回复内容.
     """
-    # 如果是新的对话，尝试从文件加载历史记录
-    if contact_name not in conversation_history:
-        conversation_history[contact_name] = load_history(contact_name)
-
-    # 将用户的新消息添加到历史记录中
-    conversation_history[contact_name].append({'role': 'user', 'parts': [user_message]})
-
     try:
-        # 开始一个聊天会话
-        chat_session = model.start_chat(
+        # --- 动态构建系统指令 ---
+        current_system_prompt = SYSTEM_PROMPT
+        if is_group and sender_name:
+            # 为群聊场景动态添加指令，告知AI当前发言人是谁
+            current_system_prompt += f"\n\n请注意：你正在一个群聊中，当前向你提问的用户是“{sender_name}”。请结合上下文，并以对“{sender_name}”说话的口吻进行回复。"
+        
+        # 每次都创建一个新的模型实例以应用最新的系统指令
+        # 注意：这可能会轻微增加延迟，但在需要动态指令时是必要的
+        dynamic_model = GenerativeModel(
+            'gemini-2.5-flash',
+            system_instruction=current_system_prompt
+        )
+
+        # --- 处理图片消息 ---
+        if image_path:
+            logger.info(f"正在准备发送图片 {image_path} 和文字 '{user_message}' 给AI。")
+            img = PIL.Image.open(image_path)
+            # 使用动态创建的模型实例
+            response = dynamic_model.generate_content([user_message, img])
+            return response.text
+
+        # --- 处理纯文本消息 ---
+        if contact_name not in conversation_history:
+            conversation_history[contact_name] = load_history(contact_name)
+
+        # 使用动态创建的模型实例开始聊天
+        chat_session = dynamic_model.start_chat(
             history=conversation_history[contact_name]
         )
         
-        # 发送消息并获取回复
         response = chat_session.send_message(user_message)
         ai_response = response.text
 
-        # 将 AI 的回复也添加到历史记录中
-        conversation_history[contact_name].append({'role': 'model', 'parts': [ai_response]})
-        
-        # 保存更新后的历史记录
+        # 手动将gemini返回的复杂历史对象转换为可序列化的字典列表
+        serializable_history = []
+        for content in chat_session.history:
+            # 确保只处理有文本部分的消息
+            parts_text = [part.text for part in content.parts if hasattr(part, 'text')]
+            if parts_text:
+                serializable_history.append({'role': content.role, 'parts': parts_text})
+
+        # 使用转换后的安全格式更新历史记录
+        conversation_history[contact_name] = serializable_history
         save_history(contact_name)
 
         return ai_response
 
     except Exception as e:
         logger.error(f"调用 Gemini API 时出错: {e}")
-        # 发生错误时，可以考虑从历史记录中移除最后一条用户消息
-        conversation_history[contact_name].pop()
+        if not image_path and contact_name in conversation_history and conversation_history[contact_name]:
+            conversation_history[contact_name].pop()
         return "抱歉，我现在有点忙，稍后再试吧。"

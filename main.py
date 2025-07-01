@@ -1,7 +1,8 @@
 import time
 import queue
+import os
 from wxauto import WeChat
-from config import LISTEN_CONTACTS, GEMINI_API_KEY, GROUP_BOT_NAME, GROUP_CHATS
+from config import LISTEN_CONTACTS, GEMINI_API_KEY, GROUP_BOT_NAME
 from gemini_handler import get_ai_response
 from logger import logger
 
@@ -11,14 +12,14 @@ task_queue = queue.Queue()
 def message_callback(msg, chat):
     """
     这是在后台线程中运行的回调函数。
-    它的作用是把收到的消息放入队列，然后立即返回。
-    chat 参数是库要求的，但我们在这里用不到它。
+    它的作用是把收到的消息和关联的聊天窗口对象一起放入队列。
     """
     try:
-        # 过滤掉非文本和自己发送的消息
-        if msg.type == 'text' and msg.attr != 'self':
-            # 将消息对象直接放入队列
-            task_queue.put(msg)
+        # 允许处理文本、语音、图片和拍一拍消息，并过滤掉自己发送的
+        allowed_types = ['text', 'voice', 'tickle', 'image']
+        if msg.type in allowed_types and msg.attr != 'self':
+            # 将消息和聊天窗口对象的元组放入队列
+            task_queue.put((msg, chat))
     except Exception as e:
         logger.error(f"[回调错误] {e}")
 
@@ -63,64 +64,88 @@ def main():
     while True:
         try:
             # 从队列中获取任务，如果队列为空，会阻塞等待
-            msg = task_queue.get(timeout=60) # 设置超时以防永久阻塞
+            msg, chat = task_queue.get(timeout=60) # 设置超时以防永久阻塞
 
-            # 获取聊天信息
-            chat_info = msg.chat_info()
-            chat_name = chat_info.get('name', msg.sender)
+            # 获取聊天信息 (改用 chat 对象，更可靠)
+            chat_info = chat.ChatInfo()
+            chat_name = chat_info.get('chat_name', msg.sender) # 使用正确的 key 'chat_name'
             
-            # 通过用户在 config.py 中定义的 GROUP_CHATS 列表来判断是否为群聊
-            is_group = chat_name in GROUP_CHATS
+            # 使用库内置方法判断是否为群聊
+            is_group = chat_info.get('chat_type') == 'group'
 
-            # 如果是群聊，并且是第一次处理该群聊的消息，则双击独立出窗口
-            if is_group and chat_name not in opened_windows:
+            # --- 1. 分类预处理，提取内容 ---
+            user_message = ""
+            image_path = None
+            ai_response = None
+
+            if msg.type == 'tickle':
+                bot_name_in_tickle = GROUP_BOT_NAME.lstrip('@')
+                if bot_name_in_tickle in msg.content:
+                    logger.info(f"被 [{msg.sender}] 拍了拍，发送一个俏皮的回复。")
+                    msg.quote("（づ￣3￣）づ╭❤～ 别拍啦，再拍就坏掉啦！")
+                else:
+                    logger.info(f"收到了一个与机器人无关的拍一拍消息，已忽略。")
+                continue
+
+            elif msg.type == 'image':
                 try:
-                    # --- 诊断代码 ---
-                    logger.info(f"正在为群聊 '{chat_name}' 尝试独立窗口...")
-                    sessions = wx.GetSession()
-                    all_session_names = [s.name for s in sessions]
-                    logger.info(f"当前可见的会话列表: {all_session_names}")
-                    # --- 诊断结束 ---
-                    
-                    session_found = False
-                    for session in sessions:
-                        if session.name == chat_name:
-                            session_found = True
-                            session.double_click()
-                            opened_windows.add(chat_name)
-                            logger.info(f"已成功将群聊 [{chat_name}] 窗口独立出来。")
-                            time.sleep(0.5) # 等待窗口弹出
-                            wx.SwitchToChat() # 将焦点切回主聊天页面，确保下次循环能正确获取会话列表
-                            break
-                    
-                    if not session_found:
-                        logger.warning(f"在会话列表中未能精确匹配到群聊 '{chat_name}'，无法独立窗口。请检查名称是否完全一致（包括特殊字符和Emoji）。")
-
+                    img_dir = "images"
+                    if not os.path.exists(img_dir):
+                        os.makedirs(img_dir)
+                    logger.info(f"收到来自 [{msg.sender}] 的图片消息，正在下载...")
+                    image_path = msg.download(dir_path=img_dir)
+                    user_message = msg.content  # 图片附带的文字
+                    logger.info(f"图片下载成功: {image_path}")
                 except Exception as e:
-                    logger.error(f"尝试独立群聊 [{chat_name}] 窗口失败: {e}")
+                    logger.error(f"下载图片失败: {e}")
+                    continue
             
-            # 提取消息内容，并为群聊做预处理
-            user_message = msg.content
-            
-            # 群聊处理逻辑：必须 @机器人才回复
-            if is_group:
-                at_name = f"@{GROUP_BOT_NAME}"
-                if at_name not in user_message:
-                    continue # 如果没有@机器人，则忽略此消息
-                
-                # 移除@信息，得到干净的用户问题
-                user_message = user_message.replace(at_name, "").strip()
-
-            logger.info(f"在 [{chat_name}] 中收到来自 [{msg.sender}] 的有效消息: {user_message}")
-
-            # 调用 AI 获取回复
-            ai_response = get_ai_response(chat_name, user_message)
-
-            # 发送回复
-            if ai_response:
-                logger.info(f"AI 生成的回复: {ai_response}")
+            elif msg.type == 'voice':
                 try:
-                    # 直接使用消息对象进行引用回复
+                    logger.info(f"收到来自 [{msg.sender}] 的语音消息，正在转为文字...")
+                    user_message = msg.to_text()
+                    if not user_message:
+                        logger.warning("语音消息转换为空文本，已忽略。")
+                        continue
+                    logger.info(f"语音转换结果: '{user_message}'")
+                except Exception as e:
+                    logger.error(f"语音转文字失败: {e}")
+                    continue
+            
+            elif msg.type == 'text':
+                user_message = msg.content
+
+            # --- 2. 应用群聊@规则 ---
+            if is_group:
+                at_name_with_symbol = f"@{GROUP_BOT_NAME}" if not GROUP_BOT_NAME.startswith('@') else GROUP_BOT_NAME
+                if at_name_with_symbol not in user_message:
+                    continue # 在群聊中，如果没有@机器人，则忽略
+                user_message = user_message.replace(at_name_with_symbol, "").strip()
+
+            # --- 3. 根据内容调用AI或进行其他处理 ---
+            if image_path:
+                # 如果用户没有附带文字，我们使用一个默认提示
+                prompt = user_message if user_message else "请详细描述这张图片，分析其中的内容和场景。"
+                logger.info(f"准备调用AI分析图片: {image_path}, 附带消息: '{prompt}'")
+                ai_response = get_ai_response(chat_name, prompt, image_path=image_path, is_group=is_group, sender_name=msg.sender)
+            
+            elif user_message:
+                # 为群聊消息加上发送者前缀，以便在历史记录中区分
+                final_user_message = f"{msg.sender}: {user_message}" if is_group else user_message
+                logger.info(f"在 [{chat_name}] 中收到来自 [{msg.sender}] 的有效消息: {user_message}")
+                ai_response = get_ai_response(chat_name, final_user_message, is_group=is_group, sender_name=msg.sender)
+            
+            else: # 处理空消息（如仅@）
+                if is_group:
+                    ai_response = "你好，我在！有什么可以帮你的吗？"
+                    logger.info(f"收到来自 [{msg.sender}] 的空@提及，已发送预设回复。")
+                else:
+                    logger.info(f"收到来自 [{msg.sender}] 的空消息，已忽略。")
+
+            # --- 4. 发送最终回复 ---
+            if ai_response:
+                logger.info(f"最终回复内容: {ai_response}")
+                try:
                     msg.quote(ai_response)
                     logger.info("回复已发送。")
                 except Exception as send_e:
