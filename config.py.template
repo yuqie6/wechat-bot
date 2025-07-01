@@ -1,0 +1,26 @@
+# Gemini API Key
+# 请将 'YOUR_API_KEY' 替换为您的 Google Gemini API 密钥
+GEMINI_API_KEY = 'YOUR_API_KEY'
+
+# (可选) 自定义 Gemini API 的 Base URL
+# 如果您使用代理或非官方端点，请在此处设置，否则保持为 None
+# 例如: GEMINI_BASE_URL = "https://api.example.com/v1beta"
+GEMINI_BASE_URL = None
+
+# (可选) AI 初始化提示词 (系统指令)
+# 在这里设定 AI 的角色、行为或回复风格
+SYSTEM_PROMPT = "你是一个智能AI助手，请用简洁、友好、专业的风格回答问题。"
+
+# (可选) 机器人在群聊中的名称
+# 当群聊中有人 @ 这个名字时，机器人才会回复
+GROUP_BOT_NAME = "AI助手"
+
+# (可选) 对话历史记录保存路径
+HISTORY_DIR = "history"
+
+# 要监听的联系人列表
+# 将下面的列表替换为您想要机器人回复的好友昵称或群聊名称
+# 例如: LISTEN_CONTACTS = ['老板', '家庭群', '文件传输助手']
+LISTEN_CONTACTS = [
+    '文件传输助手'
+]

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Logs and History
+logs/
+history/
+
+# Configuration - IMPORTANT
+# Do not commit your personal config file with API keys
+config.py
+
+# OS generated files
+.DS_Store
+Thumbs.db
