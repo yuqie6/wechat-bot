@@ -68,21 +68,33 @@ def main():
             # 获取聊天信息
             chat_info = msg.chat_info()
             chat_name = chat_info.get('name', msg.sender)
-            is_group = chat_info.get('type') == 'group'
+            # 通过判断发送者和聊天窗口名称是否相同，来确定是否为群聊 (更可靠)
+            is_group = msg.sender != chat_name
 
             # 如果是群聊，并且是第一次处理该群聊的消息，则双击独立出窗口
             if is_group and chat_name not in opened_windows:
                 try:
-                    # 遍历会话列表找到对应的群聊并双击
+                    # --- 诊断代码 ---
+                    logger.info(f"正在为群聊 '{chat_name}' 尝试独立窗口...")
                     sessions = wx.GetSession()
+                    all_session_names = [s.name for s in sessions]
+                    logger.info(f"当前可见的会话列表: {all_session_names}")
+                    # --- 诊断结束 ---
+                    
+                    session_found = False
                     for session in sessions:
                         if session.name == chat_name:
+                            session_found = True
                             session.double_click()
                             opened_windows.add(chat_name)
                             logger.info(f"已成功将群聊 [{chat_name}] 窗口独立出来。")
                             time.sleep(0.5) # 等待窗口弹出
                             wx.SwitchToChat() # 将焦点切回主聊天页面，确保下次循环能正确获取会话列表
                             break
+                    
+                    if not session_found:
+                        logger.warning(f"在会话列表中未能精确匹配到群聊 '{chat_name}'，无法独立窗口。请检查名称是否完全一致（包括特殊字符和Emoji）。")
+
                 except Exception as e:
                     logger.error(f"尝试独立群聊 [{chat_name}] 窗口失败: {e}")
             
