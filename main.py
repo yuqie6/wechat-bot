@@ -26,6 +26,7 @@ def main():
     """
     程序主入口，采用基于队列的被动监听模式。
     """
+    opened_windows = set() # 用于记录已独立出来的群聊窗口
     logger.info("--- 微信 AI 机器人启动中 (被动监听模式) ---")
 
     if not GEMINI_API_KEY or GEMINI_API_KEY == 'YOUR_API_KEY':
@@ -48,7 +49,6 @@ def main():
         logger.info(f"开始为 {len(LISTEN_CONTACTS)} 个联系人添加监听...")
         for contact in LISTEN_CONTACTS:
             try:
-                # 注意：这里的回调函数是 message_callback
                 wx.AddListenChat(nickname=contact, callback=message_callback)
                 logger.info(f"  - 已成功添加对 [{contact}] 的监听。")
             except Exception as e:
@@ -69,6 +69,21 @@ def main():
             chat_info = msg.chat_info()
             chat_name = chat_info.get('name', msg.sender)
             is_group = chat_info.get('type') == 'group'
+
+            # 如果是群聊，并且是第一次处理该群聊的消息，则双击独立出窗口
+            if is_group and chat_name not in opened_windows:
+                try:
+                    # 遍历会话列表找到对应的群聊并双击
+                    sessions = wx.GetSession()
+                    for session in sessions:
+                        if session.name == chat_name:
+                            session.double_click()
+                            opened_windows.add(chat_name)
+                            logger.info(f"已成功将群聊 [{chat_name}] 窗口独立出来。")
+                            time.sleep(0.5) # 等待窗口弹出
+                            break
+                except Exception as e:
+                    logger.error(f"尝试独立群聊 [{chat_name}] 窗口失败: {e}")
             
             # 提取消息内容，并为群聊做预处理
             user_message = msg.content
