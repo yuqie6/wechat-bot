@@ -39,3 +39,6 @@ console_handler.setFormatter(console_formatter)
 if not logger.handlers:
     logger.addHandler(handler)
     logger.addHandler(console_handler)
+
+# 防止日志向上传播到 root logger，避免重复打印
+logger.propagate = False
